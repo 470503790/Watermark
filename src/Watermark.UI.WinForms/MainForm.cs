@@ -226,16 +226,22 @@ namespace Watermark.UI.WinForms
         {
             var canvas = e.Surface.Canvas;
             canvas.Clear(new SkiaSharp.SKColor(32,32,32));
+            int baseWidth = e.Info.Width;
+            int baseHeight = e.Info.Height;
             if (_currentImagePath != null && File.Exists(_currentImagePath))
             {
                 using var bmp = SkiaSharp.SKBitmap.Decode(_currentImagePath);
                 if (bmp != null)
+                {
                     canvas.DrawBitmap(bmp, 0, 0);
+                    baseWidth = bmp.Width;
+                    baseHeight = bmp.Height;
+                }
             }
             var baseDir = GetBaseDirectory();
-            SkiaRenderer.DrawLayers(canvas, _template, e.Info.Width, e.Info.Height, baseDir);
+            SkiaRenderer.DrawLayers(canvas, _template, baseWidth, baseHeight, baseDir);
 
-            UpdateVisualCache(e.Info.Width, e.Info.Height, baseDir);
+            UpdateVisualCache(baseWidth, baseHeight, baseDir);
             if (_selected != null && _visualCache.TryGetValue(_selected, out var visual))
             {
                 DrawSelection(canvas, visual);
