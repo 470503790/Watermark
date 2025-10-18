@@ -20,6 +20,7 @@ namespace Watermark.UI.WinForms
         private LayerBase? _selected;
         private readonly Dictionary<LayerBase, LayerVisualInfo> _visualCache = new();
         private HandleGrip _activeGrip = HandleGrip.None;
+        private HandleGrip _hoverGrip = HandleGrip.None;
         private DragState? _dragState;
         private int _lastCanvasWidth;
         private int _lastCanvasHeight;
@@ -115,7 +116,14 @@ namespace Watermark.UI.WinForms
             
             if (!_dragging || _selected == null || _dragState == null)
             {
-                // Update cursor based on hover
+                // Update cursor and hover state based on hover
+                EnsureVisuals();
+                var (_, grip) = HitTestWithHandles(e.Location, false);
+                if (_hoverGrip != grip)
+                {
+                    _hoverGrip = grip;
+                    _canvas.Invalidate();
+                }
                 UpdateCursor(e.Location);
                 return;
             }
@@ -336,8 +344,10 @@ namespace Watermark.UI.WinForms
 
                 if (forceRotate)
                 {
+                    var dpiScale = DeviceDpi / 96f;
+                    var hitRadius = 10f * dpiScale;
                     var dist = Distance(pt, visual.RotateHandle);
-                    if (dist <= visual.HandleHitRadius)
+                    if (dist <= hitRadius)
                         return (layer, HandleGrip.Rotate);
                 }
 
@@ -353,13 +363,16 @@ namespace Watermark.UI.WinForms
 
         private HandleGrip HitTestHandles(LayerVisualInfo visual, SKPoint pt)
         {
+            var dpiScale = DeviceDpi / 96f;
+            var hitRadius = 10f * dpiScale;
+            
             foreach (var handle in visual.Handles)
             {
-                if (Distance(pt, handle.Position) <= visual.HandleHitRadius)
+                if (Distance(pt, handle.Position) <= hitRadius)
                     return handle.Grip;
             }
 
-            if (Distance(pt, visual.RotateHandle) <= visual.HandleHitRadius)
+            if (Distance(pt, visual.RotateHandle) <= hitRadius)
                 return HandleGrip.Rotate;
 
             return HandleGrip.None;
@@ -522,9 +535,17 @@ namespace Watermark.UI.WinForms
 
         private void DrawSelection(SKCanvas canvas, LayerVisualInfo visual)
         {
-            using var outline = new SKPaint { Color = new SKColor(102, 167, 207), IsAntialias = true, StrokeWidth = 1.5f, Style = SKPaintStyle.Stroke };
+            // Get DPI scaling factor for high DPI support
+            var dpiScale = DeviceDpi / 96f;
+            var handleSize = 6f;  // Base size in logical pixels
+            var handleStroke = 1.5f;  // Base stroke width
+            
+            using var outline = new SKPaint { Color = new SKColor(102, 167, 207), IsAntialias = true, StrokeWidth = handleStroke * dpiScale, Style = SKPaintStyle.Stroke };
             using var fill = new SKPaint { Color = new SKColor(102, 167, 207, 160), IsAntialias = true, Style = SKPaintStyle.Fill };
-            using var line = new SKPaint { Color = new SKColor(102, 167, 207, 160), IsAntialias = true, StrokeWidth = 1f, Style = SKPaintStyle.Stroke };
+            using var fillHover = new SKPaint { Color = new SKColor(102, 167, 207, 220), IsAntialias = true, Style = SKPaintStyle.Fill };
+            using var fillWhite = new SKPaint { Color = SKColors.White, IsAntialias = true, Style = SKPaintStyle.Fill };
+            using var outlineHandle = new SKPaint { Color = new SKColor(60, 60, 60), IsAntialias = true, StrokeWidth = 1f * dpiScale, Style = SKPaintStyle.Stroke };
+            using var line = new SKPaint { Color = new SKColor(102, 167, 207, 160), IsAntialias = true, StrokeWidth = 1f * dpiScale, Style = SKPaintStyle.Stroke };
 
             using var path = new SKPath();
             path.MoveTo(visual.Corners[0]);
@@ -533,15 +554,40 @@ namespace Watermark.UI.WinForms
             path.Close();
             canvas.DrawPath(path, outline);
 
+            // Draw handles with hover highlight
             foreach (var handle in visual.Handles)
             {
-                var rect = new SKRect(handle.Position.X - visual.HandleVisualRadius, handle.Position.Y - visual.HandleVisualRadius,
-                    handle.Position.X + visual.HandleVisualRadius, handle.Position.Y + visual.HandleVisualRadius);
-                canvas.DrawRect(rect, fill);
+                var isHovered = _hoverGrip == handle.Grip;
+                var rect = new SKRect(
+                    handle.Position.X - handleSize * dpiScale, 
+                    handle.Position.Y - handleSize * dpiScale,
+                    handle.Position.X + handleSize * dpiScale, 
+                    handle.Position.Y + handleSize * dpiScale);
+                canvas.DrawRect(rect, fillWhite);
+                canvas.DrawRect(rect, outlineHandle);
+                if (isHovered)
+                {
+                    var hoverRect = new SKRect(
+                        handle.Position.X - (handleSize + 2) * dpiScale,
+                        handle.Position.Y - (handleSize + 2) * dpiScale,
+                        handle.Position.X + (handleSize + 2) * dpiScale,
+                        handle.Position.Y + (handleSize + 2) * dpiScale);
+                    canvas.DrawRect(hoverRect, fillHover);
+                    canvas.DrawRect(rect, fillWhite);
+                    canvas.DrawRect(rect, outlineHandle);
+                }
             }
 
+            // Draw rotate handle with line
             canvas.DrawLine(visual.RotateBase, visual.RotateHandle, line);
-            canvas.DrawCircle(visual.RotateHandle, visual.HandleVisualRadius, fill);
+            var isRotateHovered = _hoverGrip == HandleGrip.Rotate;
+            var rotateRadius = handleSize * dpiScale;
+            if (isRotateHovered)
+            {
+                canvas.DrawCircle(visual.RotateHandle, rotateRadius + 2f * dpiScale, fillHover);
+            }
+            canvas.DrawCircle(visual.RotateHandle, rotateRadius, fillWhite);
+            canvas.DrawCircle(visual.RotateHandle, rotateRadius, outlineHandle);
         }
 
         private void ApplyMove(SKPoint current)
