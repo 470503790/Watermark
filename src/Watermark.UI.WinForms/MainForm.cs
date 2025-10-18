@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
+using SkiaSharp;
 using SkiaSharp.Views.Desktop;
 using Watermark.Core;
 using Watermark.IO;
@@ -16,6 +18,12 @@ namespace Watermark.UI.WinForms
         private string? _currentImagePath;
         private readonly SkiaRenderer _renderer = new();
         private LayerBase? _selected;
+        private readonly Dictionary<LayerBase, LayerVisualInfo> _visualCache = new();
+        private HandleGrip _activeGrip = HandleGrip.None;
+        private DragState? _dragState;
+        private int _lastCanvasWidth;
+        private int _lastCanvasHeight;
+        private string _lastBaseDir = Environment.CurrentDirectory;
 
         public MainForm()
         {
@@ -50,56 +58,77 @@ namespace Watermark.UI.WinForms
         }
 
         private bool _dragging = false;
-        private System.Drawing.Point _last;
-        private string _dragMode = "move"; // move|rotate|scale
         private void CanvasOnMouseDown(object? sender, MouseEventArgs e)
         {
-            _last = e.Location;
-            _selected = HitTest(e.Location);
-            if (_selected != null) _dragging = true;
-            _dragMode = e.Button == MouseButtons.Right ? "rotate" : "move";
+            if (e.Button != MouseButtons.Left && e.Button != MouseButtons.Right)
+            {
+                return;
+            }
+
+            EnsureVisuals();
+            var (layer, grip) = HitTestWithHandles(e.Location, e.Button == MouseButtons.Right);
+            _selected = layer;
+            _activeGrip = grip;
+            _dragging = _selected != null && grip != HandleGrip.None;
+
+            if (_dragging && _selected != null && _visualCache.TryGetValue(_selected, out var info))
+            {
+                var start = new SKPoint(e.X, e.Y);
+                _dragState = new DragState
+                {
+                    InitialMouse = start,
+                    Visual = info,
+                    InitialCorners = info.Corners.ToArray(),
+                    InitialWidth = info.Width,
+                    InitialHeight = info.Height,
+                    InitialRotation = info.Transform.Rotation,
+                    InitialX = info.ParsedX,
+                    InitialY = info.ParsedY,
+                    WidthWasAuto = info.WidthAuto,
+                    HeightWasAuto = info.HeightAuto,
+                    InitialCenter = info.Center,
+                    BaseWidth = info.BaseWidth,
+                    BaseHeight = info.BaseHeight
+                };
+            }
+            else
+            {
+                _dragState = null;
+            }
+
+            _canvas.Invalidate();
         }
         private void CanvasOnMouseMove(object? sender, MouseEventArgs e)
         {
-            if (!_dragging || _selected == null) return;
-            var dx = e.X - _last.X;
-            var dy = e.Y - _last.Y;
-            _last = e.Location;
+            if (!_dragging || _selected == null || _dragState == null) return;
 
-            if (_dragMode == "move")
+            var current = new SKPoint(e.X, e.Y);
+            switch (_activeGrip)
             {
-                // Move in pixels
-                float x = 0, y = 0;
-                float.TryParse(_selected.Transform.X, out x);
-                float.TryParse(_selected.Transform.Y, out y);
-                _selected.Transform.X = (x + dx).ToString();
-                _selected.Transform.Y = (y + dy).ToString();
-            }
-            else if (_dragMode == "rotate")
-            {
-                _selected.Transform.Rotation += dx * 0.5f;
+                case HandleGrip.Body:
+                    ApplyMove(current);
+                    break;
+                case HandleGrip.Rotate:
+                    ApplyRotate(current);
+                    break;
+                case HandleGrip.TopLeft:
+                case HandleGrip.Top:
+                case HandleGrip.TopRight:
+                case HandleGrip.Right:
+                case HandleGrip.BottomRight:
+                case HandleGrip.Bottom:
+                case HandleGrip.BottomLeft:
+                case HandleGrip.Left:
+                    ApplyScale(current, _activeGrip);
+                    break;
             }
             _canvas.Invalidate();
         }
         private void CanvasOnMouseUp(object? sender, MouseEventArgs e)
         {
             _dragging = false;
-        }
-
-        private LayerBase? HitTest(System.Drawing.Point p)
-        {
-            // naive: pick top-most layer (reverse order) near its transform (not rotation-aware for M1)
-            for (int i = _template.Layers.Count - 1; i >= 0; i--)
-            {
-                var l = _template.Layers[i];
-                if (!l.Visible) continue;
-                if (float.TryParse(l.Transform.X, out var x) && float.TryParse(l.Transform.Y, out var y))
-                {
-                    var rect = new System.Drawing.RectangleF(x - 10, y - 10, 200, 60);
-                    if (rect.Contains(p)) return l;
-                }
-            }
-            return null;
+            _activeGrip = HandleGrip.None;
+            _dragState = null;
         }
 
         private void CanvasOnPaintSurface(object? sender, SkiaSharp.Views.Desktop.SKPaintSurfaceEventArgs e)
@@ -112,7 +141,14 @@ namespace Watermark.UI.WinForms
                 if (bmp != null)
                     canvas.DrawBitmap(bmp, 0, 0);
             }
-            SkiaRenderer.DrawLayers(canvas, _template, e.Info.Width, e.Info.Height, _currentImagePath != null ? Path.GetDirectoryName(_currentImagePath)! : Environment.CurrentDirectory);
+            var baseDir = GetBaseDirectory();
+            SkiaRenderer.DrawLayers(canvas, _template, e.Info.Width, e.Info.Height, baseDir);
+
+            UpdateVisualCache(e.Info.Width, e.Info.Height, baseDir);
+            if (_selected != null && _visualCache.TryGetValue(_selected, out var visual))
+            {
+                DrawSelection(canvas, visual);
+            }
         }
 
         private void OpenImage()
@@ -202,6 +238,660 @@ namespace Watermark.UI.WinForms
                 _renderer.RenderToFile(_template, _currentImagePath, sfd.FileName, settings);
                 MessageBox.Show("已导出：" + sfd.FileName);
             }
+        }
+
+        private string GetBaseDirectory() => _currentImagePath != null ? Path.GetDirectoryName(_currentImagePath)! : Environment.CurrentDirectory;
+
+        private (LayerBase? layer, HandleGrip grip) HitTestWithHandles(System.Drawing.Point point, bool forceRotate)
+        {
+            var pt = new SKPoint(point.X, point.Y);
+            for (int i = _template.Layers.Count - 1; i >= 0; i--)
+            {
+                var layer = _template.Layers[i];
+                if (!layer.Visible) continue;
+                if (!_visualCache.TryGetValue(layer, out var visual)) continue;
+
+                if (forceRotate)
+                {
+                    var dist = Distance(pt, visual.RotateHandle);
+                    if (dist <= visual.HandleHitRadius)
+                        return (layer, HandleGrip.Rotate);
+                }
+
+                var grip = HitTestHandles(visual, pt);
+                if (grip != HandleGrip.None)
+                    return (layer, grip);
+
+                if (PointInPolygon(pt, visual.Corners))
+                    return (layer, HandleGrip.Body);
+            }
+            return (null, HandleGrip.None);
+        }
+
+        private HandleGrip HitTestHandles(LayerVisualInfo visual, SKPoint pt)
+        {
+            foreach (var handle in visual.Handles)
+            {
+                if (Distance(pt, handle.Position) <= visual.HandleHitRadius)
+                    return handle.Grip;
+            }
+
+            if (Distance(pt, visual.RotateHandle) <= visual.HandleHitRadius)
+                return HandleGrip.Rotate;
+
+            return HandleGrip.None;
+        }
+
+        private static bool PointInPolygon(SKPoint pt, IReadOnlyList<SKPoint> polygon)
+        {
+            bool inside = false;
+            for (int i = 0, j = polygon.Count - 1; i < polygon.Count; j = i++)
+            {
+                var pi = polygon[i];
+                var pj = polygon[j];
+                var intersect = ((pi.Y > pt.Y) != (pj.Y > pt.Y)) &&
+                                (pt.X < (pj.X - pi.X) * (pt.Y - pi.Y) / (pj.Y - pi.Y + float.Epsilon) + pi.X);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+
+        private void EnsureVisuals()
+        {
+            if (_visualCache.Count == 0)
+            {
+                UpdateVisualCache(_lastCanvasWidth == 0 ? Math.Max(1, _canvas.Width) : _lastCanvasWidth,
+                    _lastCanvasHeight == 0 ? Math.Max(1, _canvas.Height) : _lastCanvasHeight,
+                    _lastBaseDir);
+            }
+        }
+
+        private void UpdateVisualCache(int baseWidth, int baseHeight, string baseDir)
+        {
+            _visualCache.Clear();
+            _lastCanvasWidth = baseWidth;
+            _lastCanvasHeight = baseHeight;
+            _lastBaseDir = baseDir;
+
+            foreach (var layer in _template.Layers)
+            {
+                if (!layer.Visible) continue;
+                if (TryBuildVisualInfo(layer, baseWidth, baseHeight, baseDir, out var info))
+                {
+                    _visualCache[layer] = info;
+                }
+            }
+        }
+
+        private bool TryBuildVisualInfo(LayerBase layer, int baseWidth, int baseHeight, string baseDir, out LayerVisualInfo info)
+        {
+            info = default!;
+            float contentWidth = 1f, contentHeight = 1f;
+            switch (layer)
+            {
+                case TextLayer text:
+                {
+                    using var paint = new SKPaint { IsAntialias = true, Color = SKColors.White };
+                    paint.Typeface = SKTypeface.FromFamilyName(text.Style.FontFamily,
+                        (text.Style.FontWeight == "bold" ? SKFontStyle.Bold : SKFontStyle.Normal)
+                        .WithSlant(text.Style.FontStyle == "italic" ? SKFontStyleSlant.Italic : SKFontStyleSlant.Upright));
+                    paint.TextSize = text.Style.FontSize;
+                    var bounds = new SKRect();
+                    paint.MeasureText(text.Text ?? string.Empty, ref bounds);
+                    contentWidth = Math.Max(1f, bounds.Width);
+                    contentHeight = Math.Max(1f, bounds.Height);
+                    break;
+                }
+                case ImageLayer image:
+                {
+                    var path = image.Source?.Value;
+                    if (path is null)
+                        return false;
+                    if (image.Source.Type == "file")
+                        path = Path.Combine(baseDir, path);
+                    if (!File.Exists(path))
+                        return false;
+                    using var bmp = SKBitmap.Decode(path);
+                    if (bmp is null)
+                        return false;
+                    contentWidth = Math.Max(1f, bmp.Width);
+                    contentHeight = Math.Max(1f, bmp.Height);
+                    break;
+                }
+                default:
+                    return false;
+            }
+
+            var t = layer.Transform;
+            var parsedX = Utils.TryParsePercentOrNumber(t.X, baseWidth, out var px) ? px : 0f;
+            var parsedY = Utils.TryParsePercentOrNumber(t.Y, baseHeight, out var py) ? py : 0f;
+
+            var width = contentWidth;
+            var height = contentHeight;
+            var widthAuto = true;
+            var heightAuto = true;
+
+            if (!string.IsNullOrWhiteSpace(t.Width) && Utils.TryParsePercentOrNumber(t.Width!, baseWidth, out var w))
+            {
+                width = Math.Max(1f, w);
+                widthAuto = false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(t.Height) && Utils.TryParsePercentOrNumber(t.Height!, baseHeight, out var h))
+            {
+                height = Math.Max(1f, h);
+                heightAuto = false;
+            }
+
+            var matrix = SKMatrix.CreateTranslation(GetAnchorOffsetX(t.Anchor, width), GetAnchorOffsetY(t.Anchor, height));
+            matrix = matrix.PreConcat(SKMatrix.CreateScale(width / contentWidth, height / contentHeight));
+            matrix = matrix.PreConcat(SKMatrix.CreateRotationDegrees(t.Rotation));
+            matrix = matrix.PreConcat(SKMatrix.CreateTranslation(parsedX, parsedY));
+
+            var points = new[]
+            {
+                new SKPoint(0,0),
+                new SKPoint(contentWidth,0),
+                new SKPoint(contentWidth,contentHeight),
+                new SKPoint(0,contentHeight)
+            };
+            matrix.MapPoints(points);
+
+            var widthVec = Subtract(points[1], points[0]);
+            var heightVec = Subtract(points[3], points[0]);
+            var widthLength = Math.Max(1f, Length(widthVec));
+            var heightLength = Math.Max(1f, Length(heightVec));
+            var ux = Normalize(widthVec);
+            var uy = Normalize(heightVec);
+            var center = new SKPoint((points[0].X + points[2].X) / 2f, (points[0].Y + points[2].Y) / 2f);
+            var topCenter = new SKPoint((points[0].X + points[1].X) / 2f, (points[0].Y + points[1].Y) / 2f);
+            var rightCenter = new SKPoint((points[1].X + points[2].X) / 2f, (points[1].Y + points[2].Y) / 2f);
+            var bottomCenter = new SKPoint((points[2].X + points[3].X) / 2f, (points[2].Y + points[3].Y) / 2f);
+            var leftCenter = new SKPoint((points[3].X + points[0].X) / 2f, (points[3].Y + points[0].Y) / 2f);
+            var rotateBase = topCenter;
+            var rotateDir = Normalize(Subtract(topCenter, center));
+            if (Length(rotateDir) < 0.001f)
+                rotateDir = new SKPoint(0, -1);
+            var rotateHandle = new SKPoint(rotateBase.X + rotateDir.X * 40f, rotateBase.Y + rotateDir.Y * 40f);
+
+            var handles = new List<HandlePosition>
+            {
+                new HandlePosition(HandleGrip.TopLeft, points[0]),
+                new HandlePosition(HandleGrip.Top, topCenter),
+                new HandlePosition(HandleGrip.TopRight, points[1]),
+                new HandlePosition(HandleGrip.Right, rightCenter),
+                new HandlePosition(HandleGrip.BottomRight, points[2]),
+                new HandlePosition(HandleGrip.Bottom, bottomCenter),
+                new HandlePosition(HandleGrip.BottomLeft, points[3]),
+                new HandlePosition(HandleGrip.Left, leftCenter)
+            };
+
+            info = new LayerVisualInfo(layer, matrix, points, center, topCenter, rightCenter, bottomCenter, leftCenter,
+                rotateBase, rotateHandle, ux, uy, widthLength, heightLength, parsedX, parsedY, width, height,
+                widthAuto, heightAuto, t.Rotation, contentWidth, contentHeight, baseWidth, baseHeight, handles);
+            return true;
+        }
+
+        private void DrawSelection(SKCanvas canvas, LayerVisualInfo visual)
+        {
+            using var outline = new SKPaint { Color = new SKColor(0, 173, 255), IsAntialias = true, StrokeWidth = 1.5f, Style = SKPaintStyle.Stroke };
+            using var fill = new SKPaint { Color = new SKColor(0, 173, 255, 160), IsAntialias = true, Style = SKPaintStyle.Fill };
+            using var line = new SKPaint { Color = new SKColor(0, 173, 255, 160), IsAntialias = true, StrokeWidth = 1f, Style = SKPaintStyle.Stroke };
+
+            using var path = new SKPath();
+            path.MoveTo(visual.Corners[0]);
+            for (int i = 1; i < visual.Corners.Length; i++)
+                path.LineTo(visual.Corners[i]);
+            path.Close();
+            canvas.DrawPath(path, outline);
+
+            foreach (var handle in visual.Handles)
+            {
+                var rect = new SKRect(handle.Position.X - visual.HandleVisualRadius, handle.Position.Y - visual.HandleVisualRadius,
+                    handle.Position.X + visual.HandleVisualRadius, handle.Position.Y + visual.HandleVisualRadius);
+                canvas.DrawRect(rect, fill);
+            }
+
+            canvas.DrawLine(visual.RotateBase, visual.RotateHandle, line);
+            canvas.DrawCircle(visual.RotateHandle, visual.HandleVisualRadius, fill);
+        }
+
+        private void ApplyMove(SKPoint current)
+        {
+            if (_selected == null || _dragState == null) return;
+            var dx = current.X - _dragState.InitialMouse.X;
+            var dy = current.Y - _dragState.InitialMouse.Y;
+
+            var newX = _dragState.InitialX + dx;
+            var newY = _dragState.InitialY + dy;
+            _selected.Transform.X = FormatNumber(newX);
+            _selected.Transform.Y = FormatNumber(newY);
+        }
+
+        private void ApplyRotate(SKPoint current)
+        {
+            if (_selected == null || _dragState == null) return;
+            var center = _dragState.Visual.Center;
+            var v0 = Subtract(_dragState.InitialMouse, center);
+            var v1 = Subtract(current, center);
+            if (Length(v0) < 0.001f || Length(v1) < 0.001f) return;
+            var startAngle = MathF.Atan2(v0.Y, v0.X);
+            var currentAngle = MathF.Atan2(v1.Y, v1.X);
+            var delta = (currentAngle - startAngle) * (180f / MathF.PI);
+            var newRotation = _dragState.InitialRotation + delta;
+            _selected.Transform.Rotation = newRotation;
+        }
+
+        private void ApplyScale(SKPoint current, HandleGrip grip)
+        {
+            if (_selected == null || _dragState == null) return;
+            var info = _dragState.Visual;
+            var useCenter = (ModifierKeys & Keys.Alt) != 0;
+            var pivot = GetPivot(info, grip, useCenter);
+            var widthDir = GetWidthDirection(info, grip);
+            var heightDir = GetHeightDirection(info, grip);
+            var affectsWidth = widthDir.HasValue;
+            var affectsHeight = heightDir.HasValue;
+
+            float widthFactor = useCenter ? 2f : 1f;
+            float heightFactor = useCenter ? 2f : 1f;
+
+            var v = Subtract(current, pivot);
+            var newWidth = _dragState.InitialWidth;
+            var newHeight = _dragState.InitialHeight;
+
+            if (affectsWidth)
+            {
+                var dir = widthDir!.Value;
+                var projection = Dot(v, dir);
+                newWidth = Math.Max(4f, Math.Abs(projection) * widthFactor);
+            }
+
+            if (affectsHeight)
+            {
+                var dir = heightDir!.Value;
+                var projection = Dot(v, dir);
+                newHeight = Math.Max(4f, Math.Abs(projection) * heightFactor);
+            }
+
+            var shift = (ModifierKeys & Keys.Shift) != 0;
+            if (shift)
+            {
+                var ratio = _dragState.InitialWidth / _dragState.InitialHeight;
+                if (affectsWidth && !affectsHeight)
+                {
+                    newHeight = Math.Max(4f, newWidth / ratio);
+                    affectsHeight = true;
+                }
+                else if (!affectsWidth && affectsHeight)
+                {
+                    newWidth = Math.Max(4f, newHeight * ratio);
+                    affectsWidth = true;
+                }
+                else if (affectsWidth && affectsHeight && ratio > 0)
+                {
+                    var widthDelta = Math.Abs(newWidth - _dragState.InitialWidth);
+                    var heightDelta = Math.Abs(newHeight - _dragState.InitialHeight);
+                    if (widthDelta >= heightDelta)
+                        newHeight = Math.Max(4f, newWidth / ratio);
+                    else
+                        newWidth = Math.Max(4f, newHeight * ratio);
+                }
+            }
+
+            var newCorners = ReconstructCorners(info, grip, pivot, newWidth, newHeight, useCenter);
+            ApplyGeometryToTransform(_selected.Transform, info, newCorners, affectsWidth, affectsHeight);
+        }
+
+        private SKPoint[] ReconstructCorners(LayerVisualInfo info, HandleGrip grip, SKPoint pivot, float newWidth, float newHeight, bool useCenter)
+        {
+            var ux = info.Ux;
+            var uy = info.Uy;
+            var corners = new SKPoint[4];
+
+            if (useCenter)
+            {
+                var halfW = Multiply(ux, newWidth / 2f);
+                var halfH = Multiply(uy, newHeight / 2f);
+                corners[0] = Subtract(Subtract(pivot, halfW), halfH);
+                corners[1] = Add(Subtract(pivot, halfH), halfW);
+                corners[2] = Add(Add(pivot, halfW), halfH);
+                corners[3] = Add(Subtract(pivot, halfW), halfH);
+                return corners;
+            }
+
+            switch (grip)
+            {
+                case HandleGrip.TopLeft:
+                {
+                    var newTL = Add(Add(pivot, Multiply(ux, -newWidth)), Multiply(uy, -newHeight));
+                    corners[0] = newTL;
+                    corners[1] = Add(newTL, Multiply(ux, newWidth));
+                    corners[3] = Add(newTL, Multiply(uy, newHeight));
+                    corners[2] = Add(corners[1], Multiply(uy, newHeight));
+                    break;
+                }
+                case HandleGrip.TopRight:
+                {
+                    var newTL = Add(pivot, Multiply(uy, -newHeight));
+                    corners[0] = newTL;
+                    corners[1] = Add(newTL, Multiply(ux, newWidth));
+                    corners[3] = pivot;
+                    corners[2] = Add(corners[1], Multiply(uy, newHeight));
+                    break;
+                }
+                case HandleGrip.BottomRight:
+                {
+                    var newTL = pivot;
+                    corners[0] = newTL;
+                    corners[1] = Add(newTL, Multiply(ux, newWidth));
+                    corners[3] = Add(newTL, Multiply(uy, newHeight));
+                    corners[2] = Add(corners[1], Multiply(uy, newHeight));
+                    break;
+                }
+                case HandleGrip.BottomLeft:
+                {
+                    var newTL = Add(pivot, Multiply(ux, -newWidth));
+                    corners[0] = newTL;
+                    corners[1] = pivot;
+                    corners[3] = Add(newTL, Multiply(uy, newHeight));
+                    corners[2] = Add(corners[1], Multiply(uy, newHeight));
+                    break;
+                }
+                case HandleGrip.Top:
+                {
+                    var bottomCenter = info.BottomCenter;
+                    var halfWidth = Multiply(ux, info.Width / 2f);
+                    var topCenter = Add(bottomCenter, Multiply(uy, -newHeight));
+                    corners[0] = Subtract(topCenter, halfWidth);
+                    corners[1] = Add(topCenter, halfWidth);
+                    corners[2] = Add(bottomCenter, halfWidth);
+                    corners[3] = Subtract(bottomCenter, halfWidth);
+                    break;
+                }
+                case HandleGrip.Bottom:
+                {
+                    var topCenter = info.TopCenter;
+                    var halfWidth = Multiply(ux, info.Width / 2f);
+                    var bottomCenter = Add(topCenter, Multiply(uy, newHeight));
+                    corners[0] = Subtract(topCenter, halfWidth);
+                    corners[1] = Add(topCenter, halfWidth);
+                    corners[2] = Add(bottomCenter, halfWidth);
+                    corners[3] = Subtract(bottomCenter, halfWidth);
+                    break;
+                }
+                case HandleGrip.Right:
+                {
+                    var leftCenter = info.LeftCenter;
+                    var halfHeight = Multiply(uy, info.Height / 2f);
+                    var rightCenter = Add(leftCenter, Multiply(ux, newWidth));
+                    corners[0] = Subtract(leftCenter, halfHeight);
+                    corners[3] = Add(leftCenter, halfHeight);
+                    corners[1] = Subtract(rightCenter, halfHeight);
+                    corners[2] = Add(rightCenter, halfHeight);
+                    break;
+                }
+                case HandleGrip.Left:
+                {
+                    var rightCenter = info.RightCenter;
+                    var halfHeight = Multiply(uy, info.Height / 2f);
+                    var leftCenter = Add(rightCenter, Multiply(ux, -newWidth));
+                    corners[0] = Subtract(leftCenter, halfHeight);
+                    corners[3] = Add(leftCenter, halfHeight);
+                    corners[1] = Subtract(rightCenter, halfHeight);
+                    corners[2] = Add(rightCenter, halfHeight);
+                    break;
+                }
+            }
+
+            return corners;
+        }
+
+        private void ApplyGeometryToTransform(TransformSpec transform, LayerVisualInfo info, SKPoint[] corners, bool affectsWidth, bool affectsHeight)
+        {
+            var widthVec = Subtract(corners[1], corners[0]);
+            var heightVec = Subtract(corners[3], corners[0]);
+            var newWidth = Length(widthVec);
+            var newHeight = Length(heightVec);
+            var rotation = MathF.Atan2(widthVec.Y, widthVec.X) * (180f / MathF.PI);
+
+            var anchorPoint = GetAnchorPoint(info.Transform.Anchor, corners);
+
+            transform.X = FormatNumber(anchorPoint.X);
+            transform.Y = FormatNumber(anchorPoint.Y);
+            transform.Rotation = rotation;
+
+            if (affectsWidth || !info.WidthAuto)
+                transform.Width = FormatNumber(newWidth);
+            if (affectsHeight || !info.HeightAuto)
+                transform.Height = FormatNumber(newHeight);
+        }
+
+        private static SKPoint GetAnchorPoint(Anchor anchor, IReadOnlyList<SKPoint> corners)
+        {
+            var tl = corners[0];
+            var tr = corners[1];
+            var br = corners[2];
+            var bl = corners[3];
+            return anchor switch
+            {
+                Anchor.TL => tl,
+                Anchor.TC => new SKPoint((tl.X + tr.X) / 2f, (tl.Y + tr.Y) / 2f),
+                Anchor.TR => tr,
+                Anchor.CL => new SKPoint((tl.X + bl.X) / 2f, (tl.Y + bl.Y) / 2f),
+                Anchor.CC => new SKPoint((tl.X + br.X) / 2f, (tl.Y + br.Y) / 2f),
+                Anchor.CR => new SKPoint((tr.X + br.X) / 2f, (tr.Y + br.Y) / 2f),
+                Anchor.BL => bl,
+                Anchor.BC => new SKPoint((bl.X + br.X) / 2f, (bl.Y + br.Y) / 2f),
+                Anchor.BR => br,
+                _ => tl
+            };
+        }
+
+        private static SKPoint GetPivot(LayerVisualInfo info, HandleGrip grip, bool useCenter)
+        {
+            if (useCenter)
+                return info.Center;
+
+            return grip switch
+            {
+                HandleGrip.TopLeft => info.Corners[2],
+                HandleGrip.TopRight => info.Corners[3],
+                HandleGrip.BottomRight => info.Corners[0],
+                HandleGrip.BottomLeft => info.Corners[1],
+                HandleGrip.Top => info.BottomCenter,
+                HandleGrip.Bottom => info.TopCenter,
+                HandleGrip.Left => info.RightCenter,
+                HandleGrip.Right => info.LeftCenter,
+                _ => info.Center
+            };
+        }
+
+        private static SKPoint? GetWidthDirection(LayerVisualInfo info, HandleGrip grip)
+        {
+            return grip switch
+            {
+                HandleGrip.TopLeft => Multiply(info.Ux, -1f),
+                HandleGrip.TopRight => info.Ux,
+                HandleGrip.BottomRight => info.Ux,
+                HandleGrip.BottomLeft => Multiply(info.Ux, -1f),
+                HandleGrip.Left => Multiply(info.Ux, -1f),
+                HandleGrip.Right => info.Ux,
+                _ => null
+            };
+        }
+
+        private static SKPoint? GetHeightDirection(LayerVisualInfo info, HandleGrip grip)
+        {
+            return grip switch
+            {
+                HandleGrip.TopLeft => Multiply(info.Uy, -1f),
+                HandleGrip.TopRight => Multiply(info.Uy, -1f),
+                HandleGrip.BottomRight => info.Uy,
+                HandleGrip.BottomLeft => info.Uy,
+                HandleGrip.Top => Multiply(info.Uy, -1f),
+                HandleGrip.Bottom => info.Uy,
+                _ => null
+            };
+        }
+
+        private static float GetAnchorOffsetX(Anchor anchor, float width)
+        {
+            return anchor switch
+            {
+                Anchor.TL or Anchor.CL or Anchor.BL => 0f,
+                Anchor.TC or Anchor.CC or Anchor.BC => -width / 2f,
+                Anchor.TR or Anchor.CR or Anchor.BR => -width,
+                _ => 0f
+            };
+        }
+
+        private static float GetAnchorOffsetY(Anchor anchor, float height)
+        {
+            return anchor switch
+            {
+                Anchor.TL or Anchor.TC or Anchor.TR => 0f,
+                Anchor.CL or Anchor.CC or Anchor.CR => -height / 2f,
+                Anchor.BL or Anchor.BC or Anchor.BR => -height,
+                _ => 0f
+            };
+        }
+
+        private static float Distance(SKPoint a, SKPoint b)
+        {
+            var dx = a.X - b.X;
+            var dy = a.Y - b.Y;
+            return MathF.Sqrt(dx * dx + dy * dy);
+        }
+
+        private static SKPoint Subtract(SKPoint a, SKPoint b) => new(a.X - b.X, a.Y - b.Y);
+        private static SKPoint Add(SKPoint a, SKPoint b) => new(a.X + b.X, a.Y + b.Y);
+        private static SKPoint Multiply(SKPoint v, float s) => new(v.X * s, v.Y * s);
+        private static float Dot(SKPoint a, SKPoint b) => a.X * b.X + a.Y * b.Y;
+        private static float Length(SKPoint v) => MathF.Sqrt(MathF.Max(0f, v.X * v.X + v.Y * v.Y));
+        private static SKPoint Normalize(SKPoint v)
+        {
+            var len = Length(v);
+            if (len < 0.0001f) return new SKPoint(0, 0);
+            return new SKPoint(v.X / len, v.Y / len);
+        }
+
+        private static string FormatNumber(float value)
+        {
+            return Math.Round(value, 2).ToString("0.##");
+        }
+
+        private readonly struct HandlePosition
+        {
+            public HandlePosition(HandleGrip grip, SKPoint position)
+            {
+                Grip = grip;
+                Position = position;
+            }
+
+            public HandleGrip Grip { get; }
+            public SKPoint Position { get; }
+        }
+
+        private sealed class LayerVisualInfo
+        {
+            public LayerVisualInfo(LayerBase layer, SKMatrix matrix, SKPoint[] corners, SKPoint center,
+                SKPoint topCenter, SKPoint rightCenter, SKPoint bottomCenter, SKPoint leftCenter,
+                SKPoint rotateBase, SKPoint rotateHandle, SKPoint ux, SKPoint uy, float width, float height,
+                float parsedX, float parsedY, float finalWidth, float finalHeight, bool widthAuto, bool heightAuto,
+                float rotation, float contentWidth, float contentHeight, int baseWidth, int baseHeight,
+                List<HandlePosition> handles)
+            {
+                Layer = layer;
+                Matrix = matrix;
+                Corners = corners;
+                Center = center;
+                TopCenter = topCenter;
+                RightCenter = rightCenter;
+                BottomCenter = bottomCenter;
+                LeftCenter = leftCenter;
+                RotateBase = rotateBase;
+                RotateHandle = rotateHandle;
+                Ux = ux;
+                Uy = uy;
+                Width = width;
+                Height = height;
+                ParsedX = parsedX;
+                ParsedY = parsedY;
+                FinalWidth = finalWidth;
+                FinalHeight = finalHeight;
+                WidthAuto = widthAuto;
+                HeightAuto = heightAuto;
+                Transform = layer.Transform;
+                ContentWidth = contentWidth;
+                ContentHeight = contentHeight;
+                BaseWidth = baseWidth;
+                BaseHeight = baseHeight;
+                Handles = handles;
+                Rotation = rotation;
+            }
+
+            public LayerBase Layer { get; }
+            public SKMatrix Matrix { get; }
+            public SKPoint[] Corners { get; }
+            public SKPoint Center { get; }
+            public SKPoint TopCenter { get; }
+            public SKPoint RightCenter { get; }
+            public SKPoint BottomCenter { get; }
+            public SKPoint LeftCenter { get; }
+            public SKPoint RotateBase { get; }
+            public SKPoint RotateHandle { get; }
+            public SKPoint Ux { get; }
+            public SKPoint Uy { get; }
+            public float Width { get; }
+            public float Height { get; }
+            public float ParsedX { get; }
+            public float ParsedY { get; }
+            public float FinalWidth { get; }
+            public float FinalHeight { get; }
+            public bool WidthAuto { get; }
+            public bool HeightAuto { get; }
+            public TransformSpec Transform { get; }
+            public float ContentWidth { get; }
+            public float ContentHeight { get; }
+            public int BaseWidth { get; }
+            public int BaseHeight { get; }
+            public IReadOnlyList<HandlePosition> Handles { get; }
+            public float Rotation { get; }
+            public float HandleVisualRadius => 6f;
+            public float HandleHitRadius => 10f;
+        }
+
+        private sealed class DragState
+        {
+            public required SKPoint InitialMouse { get; init; }
+            public required LayerVisualInfo Visual { get; init; }
+            public required SKPoint[] InitialCorners { get; init; }
+            public required float InitialWidth { get; init; }
+            public required float InitialHeight { get; init; }
+            public required float InitialRotation { get; init; }
+            public required float InitialX { get; init; }
+            public required float InitialY { get; init; }
+            public required bool WidthWasAuto { get; init; }
+            public required bool HeightWasAuto { get; init; }
+            public required SKPoint InitialCenter { get; init; }
+            public required float BaseWidth { get; init; }
+            public required float BaseHeight { get; init; }
+        }
+
+        private enum HandleGrip
+        {
+            None,
+            Body,
+            Rotate,
+            TopLeft,
+            Top,
+            TopRight,
+            Right,
+            BottomRight,
+            Bottom,
+            BottomLeft,
+            Left
         }
     }
 }
