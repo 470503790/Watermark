@@ -25,6 +25,32 @@ A fast, stable, client-only image watermarking tool. Windows GUI first, with a c
 - Press F5 from the WinForms project. Use **File → Open Image** to load a base image,
   **Insert → Text/Image** to add watermarks, **Template → Save/Load**, **Export** to save.
 
+## Editor Operations
+### Canvas Interactions
+- **Select Layer**: Click on any layer to select it
+- **Deselect**: Click on empty canvas area
+- **Move Layer**: Drag the selected layer body
+- **Resize**: Drag any of the 8 resize handles (4 corners + 4 edges)
+  - **Shift + Drag**: Proportional resize (maintain aspect ratio)
+  - **Alt + Drag**: Resize from center
+- **Rotate**: Right-click and drag, or drag the rotate handle (circle above layer)
+  - **Shift + Rotate**: Snap to 15° increments
+- **Keyboard Nudge**: 
+  - **Arrow Keys**: Move selected layer by 1px
+  - **Shift + Arrow Keys**: Move selected layer by 10px
+
+### Handle Visual Feedback
+- 8 resize handles appear as white squares with dark borders when layer is selected
+- Rotate handle appears as a circle above the layer, connected by a line
+- Handles highlight when hovered
+- Cursor changes to indicate resize/rotate direction
+- Selection box shown in light blue (#66A7CF)
+
+### High DPI Support
+- Handle sizes scale appropriately on 125%, 150%, and higher DPI displays
+- All interactions remain pixel-precise regardless of display scaling
+
+
 ## Roadmap
 - Batch processing and data bindings (M2-M3) — see `docs/CODEX_TASKS.md`
 

@@ -20,6 +20,7 @@ namespace Watermark.UI.WinForms
         private LayerBase? _selected;
         private readonly Dictionary<LayerBase, LayerVisualInfo> _visualCache = new();
         private HandleGrip _activeGrip = HandleGrip.None;
+        private HandleGrip _hoverGrip = HandleGrip.None;
         private DragState? _dragState;
         private int _lastCanvasWidth;
         private int _lastCanvasHeight;
@@ -55,9 +56,11 @@ namespace Watermark.UI.WinForms
             Controls.Add(_canvas);
 
             DoubleBuffered = true;
+            KeyPreview = true;
         }
 
         private bool _dragging = false;
+        private SKPoint _hoverPoint;
         private void CanvasOnMouseDown(object? sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left && e.Button != MouseButtons.Right)
@@ -67,6 +70,15 @@ namespace Watermark.UI.WinForms
 
             EnsureVisuals();
             var (layer, grip) = HitTestWithHandles(e.Location, e.Button == MouseButtons.Right);
+            
+            // Click on empty canvas to deselect
+            if (layer == null && e.Button == MouseButtons.Left)
+            {
+                _selected = null;
+                _canvas.Invalidate();
+                return;
+            }
+            
             _selected = layer;
             _activeGrip = grip;
             _dragging = _selected != null && grip != HandleGrip.None;
@@ -100,7 +112,21 @@ namespace Watermark.UI.WinForms
         }
         private void CanvasOnMouseMove(object? sender, MouseEventArgs e)
         {
-            if (!_dragging || _selected == null || _dragState == null) return;
+            _hoverPoint = new SKPoint(e.X, e.Y);
+            
+            if (!_dragging || _selected == null || _dragState == null)
+            {
+                // Update cursor and hover state based on hover
+                EnsureVisuals();
+                var (_, grip) = HitTestWithHandles(e.Location, false);
+                if (_hoverGrip != grip)
+                {
+                    _hoverGrip = grip;
+                    _canvas.Invalidate();
+                }
+                UpdateCursor(e.Location);
+                return;
+            }
 
             var current = new SKPoint(e.X, e.Y);
             switch (_activeGrip)
@@ -129,6 +155,71 @@ namespace Watermark.UI.WinForms
             _dragging = false;
             _activeGrip = HandleGrip.None;
             _dragState = null;
+            UpdateCursor(e.Location);
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (_selected == null) return base.ProcessCmdKey(ref msg, keyData);
+
+            var shift = (keyData & Keys.Shift) != 0;
+            var delta = shift ? 10f : 1f;
+            var key = keyData & ~Keys.Shift;
+
+            switch (key)
+            {
+                case Keys.Left:
+                    NudgeLayer(_selected, -delta, 0);
+                    return true;
+                case Keys.Right:
+                    NudgeLayer(_selected, delta, 0);
+                    return true;
+                case Keys.Up:
+                    NudgeLayer(_selected, 0, -delta);
+                    return true;
+                case Keys.Down:
+                    NudgeLayer(_selected, 0, delta);
+                    return true;
+            }
+
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void NudgeLayer(LayerBase layer, float dx, float dy)
+        {
+            var t = layer.Transform;
+            if (Utils.TryParsePercentOrNumber(t.X, _lastCanvasWidth, out var x))
+            {
+                t.X = FormatNumber(x + dx);
+            }
+            if (Utils.TryParsePercentOrNumber(t.Y, _lastCanvasHeight, out var y))
+            {
+                t.Y = FormatNumber(y + dy);
+            }
+            _canvas.Invalidate();
+        }
+
+        private void UpdateCursor(System.Drawing.Point point)
+        {
+            if (_dragging)
+            {
+                // Keep current cursor during drag
+                return;
+            }
+
+            EnsureVisuals();
+            var (layer, grip) = HitTestWithHandles(point, false);
+            
+            _canvas.Cursor = grip switch
+            {
+                HandleGrip.Body => Cursors.SizeAll,
+                HandleGrip.Rotate => Cursors.Hand,
+                HandleGrip.TopLeft or HandleGrip.BottomRight => Cursors.SizeNWSE,
+                HandleGrip.TopRight or HandleGrip.BottomLeft => Cursors.SizeNESW,
+                HandleGrip.Top or HandleGrip.Bottom => Cursors.SizeNS,
+                HandleGrip.Left or HandleGrip.Right => Cursors.SizeWE,
+                _ => Cursors.Default
+            };
         }
 
         private void CanvasOnPaintSurface(object? sender, SkiaSharp.Views.Desktop.SKPaintSurfaceEventArgs e)
@@ -253,8 +344,10 @@ namespace Watermark.UI.WinForms
 
                 if (forceRotate)
                 {
+                    var dpiScale = DeviceDpi / 96f;
+                    var hitRadius = 10f * dpiScale;
                     var dist = Distance(pt, visual.RotateHandle);
-                    if (dist <= visual.HandleHitRadius)
+                    if (dist <= hitRadius)
                         return (layer, HandleGrip.Rotate);
                 }
 
@@ -270,13 +363,16 @@ namespace Watermark.UI.WinForms
 
         private HandleGrip HitTestHandles(LayerVisualInfo visual, SKPoint pt)
         {
+            var dpiScale = DeviceDpi / 96f;
+            var hitRadius = 10f * dpiScale;
+            
             foreach (var handle in visual.Handles)
             {
-                if (Distance(pt, handle.Position) <= visual.HandleHitRadius)
+                if (Distance(pt, handle.Position) <= hitRadius)
                     return handle.Grip;
             }
 
-            if (Distance(pt, visual.RotateHandle) <= visual.HandleHitRadius)
+            if (Distance(pt, visual.RotateHandle) <= hitRadius)
                 return HandleGrip.Rotate;
 
             return HandleGrip.None;
@@ -332,9 +428,14 @@ namespace Watermark.UI.WinForms
                 case TextLayer text:
                 {
                     using var paint = new SKPaint { IsAntialias = true, Color = SKColors.White };
-                    paint.Typeface = SKTypeface.FromFamilyName(text.Style.FontFamily,
-                        (text.Style.FontWeight == "bold" ? SKFontStyle.Bold : SKFontStyle.Normal)
-                        .WithSlant(text.Style.FontStyle == "italic" ? SKFontStyleSlant.Italic : SKFontStyleSlant.Upright));
+                    var isBold = string.Equals(text.Style.FontWeight, "bold", StringComparison.OrdinalIgnoreCase);
+                    var isItalic = string.Equals(text.Style.FontStyle, "italic", StringComparison.OrdinalIgnoreCase);
+                    SKFontStyle fontStyle =
+                        isBold && isItalic ? SKFontStyle.BoldItalic :
+                        isBold ? SKFontStyle.Bold :
+                        isItalic ? SKFontStyle.Italic :
+                        SKFontStyle.Normal;
+                    paint.Typeface = SKTypeface.FromFamilyName(text.Style.FontFamily, fontStyle);
                     paint.TextSize = text.Style.FontSize;
                     var bounds = new SKRect();
                     paint.MeasureText(text.Text ?? string.Empty, ref bounds);
@@ -412,7 +513,7 @@ namespace Watermark.UI.WinForms
             var rotateDir = Normalize(Subtract(topCenter, center));
             if (Length(rotateDir) < 0.001f)
                 rotateDir = new SKPoint(0, -1);
-            var rotateHandle = new SKPoint(rotateBase.X + rotateDir.X * 40f, rotateBase.Y + rotateDir.Y * 40f);
+            var rotateHandle = new SKPoint(rotateBase.X + rotateDir.X * 24f, rotateBase.Y + rotateDir.Y * 24f);
 
             var handles = new List<HandlePosition>
             {
@@ -434,9 +535,17 @@ namespace Watermark.UI.WinForms
 
         private void DrawSelection(SKCanvas canvas, LayerVisualInfo visual)
         {
-            using var outline = new SKPaint { Color = new SKColor(0, 173, 255), IsAntialias = true, StrokeWidth = 1.5f, Style = SKPaintStyle.Stroke };
-            using var fill = new SKPaint { Color = new SKColor(0, 173, 255, 160), IsAntialias = true, Style = SKPaintStyle.Fill };
-            using var line = new SKPaint { Color = new SKColor(0, 173, 255, 160), IsAntialias = true, StrokeWidth = 1f, Style = SKPaintStyle.Stroke };
+            // Get DPI scaling factor for high DPI support
+            var dpiScale = DeviceDpi / 96f;
+            var handleSize = 6f;  // Base size in logical pixels
+            var handleStroke = 1.5f;  // Base stroke width
+            
+            using var outline = new SKPaint { Color = new SKColor(102, 167, 207), IsAntialias = true, StrokeWidth = handleStroke * dpiScale, Style = SKPaintStyle.Stroke };
+            using var fill = new SKPaint { Color = new SKColor(102, 167, 207, 160), IsAntialias = true, Style = SKPaintStyle.Fill };
+            using var fillHover = new SKPaint { Color = new SKColor(102, 167, 207, 220), IsAntialias = true, Style = SKPaintStyle.Fill };
+            using var fillWhite = new SKPaint { Color = SKColors.White, IsAntialias = true, Style = SKPaintStyle.Fill };
+            using var outlineHandle = new SKPaint { Color = new SKColor(60, 60, 60), IsAntialias = true, StrokeWidth = 1f * dpiScale, Style = SKPaintStyle.Stroke };
+            using var line = new SKPaint { Color = new SKColor(102, 167, 207, 160), IsAntialias = true, StrokeWidth = 1f * dpiScale, Style = SKPaintStyle.Stroke };
 
             using var path = new SKPath();
             path.MoveTo(visual.Corners[0]);
@@ -445,15 +554,40 @@ namespace Watermark.UI.WinForms
             path.Close();
             canvas.DrawPath(path, outline);
 
+            // Draw handles with hover highlight
             foreach (var handle in visual.Handles)
             {
-                var rect = new SKRect(handle.Position.X - visual.HandleVisualRadius, handle.Position.Y - visual.HandleVisualRadius,
-                    handle.Position.X + visual.HandleVisualRadius, handle.Position.Y + visual.HandleVisualRadius);
-                canvas.DrawRect(rect, fill);
+                var isHovered = _hoverGrip == handle.Grip;
+                var rect = new SKRect(
+                    handle.Position.X - handleSize * dpiScale, 
+                    handle.Position.Y - handleSize * dpiScale,
+                    handle.Position.X + handleSize * dpiScale, 
+                    handle.Position.Y + handleSize * dpiScale);
+                canvas.DrawRect(rect, fillWhite);
+                canvas.DrawRect(rect, outlineHandle);
+                if (isHovered)
+                {
+                    var hoverRect = new SKRect(
+                        handle.Position.X - (handleSize + 2) * dpiScale,
+                        handle.Position.Y - (handleSize + 2) * dpiScale,
+                        handle.Position.X + (handleSize + 2) * dpiScale,
+                        handle.Position.Y + (handleSize + 2) * dpiScale);
+                    canvas.DrawRect(hoverRect, fillHover);
+                    canvas.DrawRect(rect, fillWhite);
+                    canvas.DrawRect(rect, outlineHandle);
+                }
             }
 
+            // Draw rotate handle with line
             canvas.DrawLine(visual.RotateBase, visual.RotateHandle, line);
-            canvas.DrawCircle(visual.RotateHandle, visual.HandleVisualRadius, fill);
+            var isRotateHovered = _hoverGrip == HandleGrip.Rotate;
+            var rotateRadius = handleSize * dpiScale;
+            if (isRotateHovered)
+            {
+                canvas.DrawCircle(visual.RotateHandle, rotateRadius + 2f * dpiScale, fillHover);
+            }
+            canvas.DrawCircle(visual.RotateHandle, rotateRadius, fillWhite);
+            canvas.DrawCircle(visual.RotateHandle, rotateRadius, outlineHandle);
         }
 
         private void ApplyMove(SKPoint current)
@@ -479,6 +613,13 @@ namespace Watermark.UI.WinForms
             var currentAngle = MathF.Atan2(v1.Y, v1.X);
             var delta = (currentAngle - startAngle) * (180f / MathF.PI);
             var newRotation = _dragState.InitialRotation + delta;
+            
+            // Shift: snap to 15° increments
+            if ((ModifierKeys & Keys.Shift) != 0)
+            {
+                newRotation = MathF.Round(newRotation / 15f) * 15f;
+            }
+            
             _selected.Transform.Rotation = newRotation;
         }
 
@@ -667,7 +808,7 @@ namespace Watermark.UI.WinForms
                 transform.Height = FormatNumber(newHeight);
         }
 
-        private static SKPoint GetAnchorPoint(Anchor anchor, IReadOnlyList<SKPoint> corners)
+        private static SKPoint GetAnchorPoint(Core.Anchor anchor, IReadOnlyList<SKPoint> corners)
         {
             var tl = corners[0];
             var tr = corners[1];
@@ -675,15 +816,15 @@ namespace Watermark.UI.WinForms
             var bl = corners[3];
             return anchor switch
             {
-                Anchor.TL => tl,
-                Anchor.TC => new SKPoint((tl.X + tr.X) / 2f, (tl.Y + tr.Y) / 2f),
-                Anchor.TR => tr,
-                Anchor.CL => new SKPoint((tl.X + bl.X) / 2f, (tl.Y + bl.Y) / 2f),
-                Anchor.CC => new SKPoint((tl.X + br.X) / 2f, (tl.Y + br.Y) / 2f),
-                Anchor.CR => new SKPoint((tr.X + br.X) / 2f, (tr.Y + br.Y) / 2f),
-                Anchor.BL => bl,
-                Anchor.BC => new SKPoint((bl.X + br.X) / 2f, (bl.Y + br.Y) / 2f),
-                Anchor.BR => br,
+                Core.Anchor.TL => tl,
+                Core.Anchor.TC => new SKPoint((tl.X + tr.X) / 2f, (tl.Y + tr.Y) / 2f),
+                Core.Anchor.TR => tr,
+                Core.Anchor.CL => new SKPoint((tl.X + bl.X) / 2f, (tl.Y + bl.Y) / 2f),
+                Core.Anchor.CC => new SKPoint((tl.X + br.X) / 2f, (tl.Y + br.Y) / 2f),
+                Core.Anchor.CR => new SKPoint((tr.X + br.X) / 2f, (tr.Y + br.Y) / 2f),
+                Core.Anchor.BL => bl,
+                Core.Anchor.BC => new SKPoint((bl.X + br.X) / 2f, (bl.Y + br.Y) / 2f),
+                Core.Anchor.BR => br,
                 _ => tl
             };
         }
@@ -735,24 +876,24 @@ namespace Watermark.UI.WinForms
             };
         }
 
-        private static float GetAnchorOffsetX(Anchor anchor, float width)
+        private static float GetAnchorOffsetX(Core.Anchor anchor, float width)
         {
             return anchor switch
             {
-                Anchor.TL or Anchor.CL or Anchor.BL => 0f,
-                Anchor.TC or Anchor.CC or Anchor.BC => -width / 2f,
-                Anchor.TR or Anchor.CR or Anchor.BR => -width,
+                Core.Anchor.TL or Core.Anchor.CL or Core.Anchor.BL => 0f,
+                Core.Anchor.TC or Core.Anchor.CC or Core.Anchor.BC => -width / 2f,
+                Core.Anchor.TR or Core.Anchor.CR or Core.Anchor.BR => -width,
                 _ => 0f
             };
         }
 
-        private static float GetAnchorOffsetY(Anchor anchor, float height)
+        private static float GetAnchorOffsetY(Core.Anchor anchor, float height)
         {
             return anchor switch
             {
-                Anchor.TL or Anchor.TC or Anchor.TR => 0f,
-                Anchor.CL or Anchor.CC or Anchor.CR => -height / 2f,
-                Anchor.BL or Anchor.BC or Anchor.BR => -height,
+                Core.Anchor.TL or Core.Anchor.TC or Core.Anchor.TR => 0f,
+                Core.Anchor.CL or Core.Anchor.CC or Core.Anchor.CR => -height / 2f,
+                Core.Anchor.BL or Core.Anchor.BC or Core.Anchor.BR => -height,
                 _ => 0f
             };
         }
