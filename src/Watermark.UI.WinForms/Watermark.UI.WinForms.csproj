@@ -1,15 +1,18 @@
-<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <OutputType>WinExe</OutputType>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Watermark.Core\Watermark.Core.csproj" />
     <ProjectReference Include="..\Watermark.Render.Skia\Watermark.Render.Skia.csproj" />
     <ProjectReference Include="..\Watermark.IO\Watermark.IO.csproj" />
   </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="SkiaSharp.Views.WindowsForms" Version="2.88.6" />
     <PackageReference Include="SkiaSharp" Version="2.88.6" />

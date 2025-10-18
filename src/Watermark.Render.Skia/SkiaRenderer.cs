@@ -90,9 +90,18 @@ public sealed class SkiaRenderer : IRenderer
     private static void DrawTextLayer(SKCanvas canvas, TextLayer layer, int baseW, int baseH)
     {
         using var paint = new SKPaint { IsAntialias = true, Color = ParseColor(layer.Style.FillColor) };
-        paint.Typeface = SKTypeface.FromFamilyName(layer.Style.FontFamily, 
-            (layer.Style.FontWeight == "bold" ? SKFontStyle.Bold : SKFontStyle.Normal) 
-            .WithSlant(layer.Style.FontStyle == "italic" ? SKFontStyleSlant.Italic : SKFontStyleSlant.Upright));
+
+        // 处理字体样式 (粗体 / 斜体 组合)
+        var isBold = string.Equals(layer.Style.FontWeight, "bold", StringComparison.OrdinalIgnoreCase);
+        var isItalic = string.Equals(layer.Style.FontStyle, "italic", StringComparison.OrdinalIgnoreCase);
+
+        SKFontStyle fontStyle =
+            isBold && isItalic ? SKFontStyle.BoldItalic :
+            isBold ? SKFontStyle.Bold :
+            isItalic ? SKFontStyle.Italic :
+            SKFontStyle.Normal;
+
+        paint.Typeface = SKTypeface.FromFamilyName(layer.Style.FontFamily, fontStyle);
         paint.TextSize = layer.Style.FontSize;
 
         var text = layer.Text ?? string.Empty;
@@ -104,13 +113,9 @@ public sealed class SkiaRenderer : IRenderer
         canvas.Save();
         ApplyTransform(canvas, layer.Transform, Math.Max(contentW, 1), Math.Max(contentH, 1), baseW, baseH);
 
-        // Align baseline: draw relative to top-left of content box
-        float tx = 0, ty = -bounds.Top; // shift so top aligns to 0
-
-        // Horizontal align within MaxWidth (simple)
+        float tx = 0, ty = -bounds.Top; // 让文本顶部对齐
         if (layer.Style.MaxWidth.HasValue)
         {
-            // Basic wrap not implemented in M1: clamp to max width
             contentW = Math.Min(contentW, layer.Style.MaxWidth.Value);
         }
 

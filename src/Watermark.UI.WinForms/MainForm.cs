@@ -169,7 +169,7 @@ namespace Watermark.UI.WinForms
                 Name = "文本",
                 Text = "双击编辑",
                 Style = new TextStyle { FontFamily = "Arial", FontSize = 48, FillColor = "#FFFFFFFF", TextAlign = "left" },
-                Transform = new TransformSpec { X = "100", Y = "100", Anchor = Anchor.TL }
+                Transform = new TransformSpec { X = "100", Y = "100", Anchor = Watermark.Core.Anchor.TL }
             };
             _template.Layers.Add(tl);
             _selected = tl;
@@ -186,7 +186,7 @@ namespace Watermark.UI.WinForms
                 {
                     Name = "图片",
                     Source = new ImageSource { Type = "file", Value = rel },
-                    Transform = new TransformSpec { X = "200", Y = "200", Anchor = Anchor.TL }
+                    Transform = new TransformSpec { X = "200", Y = "200", Anchor = Watermark.Core.Anchor.TL }
                 };
                 _template.Layers.Add(il);
                 _selected = il;
