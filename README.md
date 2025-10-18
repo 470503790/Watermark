@@ -30,3 +30,4 @@ A fast, stable, client-only image watermarking tool. Windows GUI first, with a c
 
 ## License
 MIT
+ 
