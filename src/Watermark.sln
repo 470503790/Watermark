@@ -1,0 +1,39 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31912.275
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Watermark.Core", "Watermark.Core\Watermark.Core.csproj", "{83A4FB17-856F-46FD-9A43-9D2F5AB49516}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Watermark.Render.Skia", "Watermark.Render.Skia\Watermark.Render.Skia.csproj", "{3D900D6F-54A2-4698-A6D6-092B73D79958}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Watermark.IO", "Watermark.IO\Watermark.IO.csproj", "{7E9B770D-A191-4242-A4CE-D2E040E41457}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Watermark.UI.WinForms", "Watermark.UI.WinForms\Watermark.UI.WinForms.csproj", "{3C12F4A0-8C6D-4666-A2A3-203FB4CC0F87}"
+EndProject
+Global
+    GlobalSection(SolutionConfigurationPlatforms) = preSolution
+        Debug|Any CPU = Debug|Any CPU
+        Release|Any CPU = Release|Any CPU
+    EndGlobalSection
+    GlobalSection(ProjectConfigurationPlatforms) = postSolution
+        {83A4FB17-856F-46FD-9A43-9D2F5AB49516}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+        {83A4FB17-856F-46FD-9A43-9D2F5AB49516}.Debug|Any CPU.Build.0 = Debug|Any CPU
+        {83A4FB17-856F-46FD-9A43-9D2F5AB49516}.Release|Any CPU.ActiveCfg = Release|Any CPU
+        {83A4FB17-856F-46FD-9A43-9D2F5AB49516}.Release|Any CPU.Build.0 = Release|Any CPU
+        {3D900D6F-54A2-4698-A6D6-092B73D79958}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+        {3D900D6F-54A2-4698-A6D6-092B73D79958}.Debug|Any CPU.Build.0 = Debug|Any CPU
+        {3D900D6F-54A2-4698-A6D6-092B73D79958}.Release|Any CPU.ActiveCfg = Release|Any CPU
+        {3D900D6F-54A2-4698-A6D6-092B73D79958}.Release|Any CPU.Build.0 = Release|Any CPU
+        {7E9B770D-A191-4242-A4CE-D2E040E41457}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+        {7E9B770D-A191-4242-A4CE-D2E040E41457}.Debug|Any CPU.Build.0 = Debug|Any CPU
+        {7E9B770D-A191-4242-A4CE-D2E040E41457}.Release|Any CPU.ActiveCfg = Release|Any CPU
+        {7E9B770D-A191-4242-A4CE-D2E040E41457}.Release|Any CPU.Build.0 = Release|Any CPU
+        {3C12F4A0-8C6D-4666-A2A3-203FB4CC0F87}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+        {3C12F4A0-8C6D-4666-A2A3-203FB4CC0F87}.Debug|Any CPU.Build.0 = Debug|Any CPU
+        {3C12F4A0-8C6D-4666-A2A3-203FB4CC0F87}.Release|Any CPU.ActiveCfg = Release|Any CPU
+        {3C12F4A0-8C6D-4666-A2A3-203FB4CC0F87}.Release|Any CPU.Build.0 = Release|Any CPU
+    EndGlobalSection
+    GlobalSection(SolutionProperties) = preSolution
+        HideSolutionNode = FALSE
+    EndGlobalSection
+EndGlobal

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0",
+  "canvas": {
+    "width": 2000,
+    "height": 1400,
+    "dpi": 96,
+    "background": {
+      "type": "transparent"
+    }
+  },
+  "variables": {
+    "brand": "ACME"
+  },
+  "layers": [
+    {
+      "type": "TextLayer",
+      "id": "title",
+      "name": "标题",
+      "visible": true,
+      "opacity": 1.0,
+      "transform": {
+        "x": "50%",
+        "y": 120,
+        "anchor": "tc"
+      },
+      "text": "Hello, Watermark!",
+      "style": {
+        "fontFamily": "Arial",
+        "fontSize": 64,
+        "fontWeight": "bold",
+        "fontStyle": "normal",
+        "fillColor": "#FFFFFFFF",
+        "textAlign": "center",
+        "maxWidth": 1600
+      }
+    }
+  ],
+  "export": {
+    "format": "png",
+    "fileNameTemplate": "{filename}_wm.png",
+    "jpegQuality": 90,
+    "pngCompression": 6,
+    "stripMetadata": false
+  }
+}
